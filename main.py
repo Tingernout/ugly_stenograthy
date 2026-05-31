@@ -3,6 +3,7 @@ import os
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 import threading
+from crypto_lsb import encrypt_message, decrypt_message, embed_bit, extract_bit
 
 
 def d2xy(n, d):
@@ -35,43 +36,8 @@ def hilbert_curve_points(order):
     return points
 
 
-def image_looking(input_image):
-    """Извлекает текст из изображения по кривой Гильберта."""
-    if not os.path.exists(input_image):
-        return False, "Файл не найден."
-    
-    modify_image = cv2.imread(input_image)
-    if modify_image is None:
-        return False, "Ошибка: невозможно загрузить изображение. Проверьте путь и формат файла."
-
-    image_text = ""
-    height, width, _ = modify_image.shape
-
-    order = 3  # 3-й порядок -> 8x8 квадрат
-    points = hilbert_curve_points(order)
-
-    # Проверим, что изображение достаточно большое по ширине и высоте
-    if height < 8 or width < 8*4:
-        return False, "Изображение слишком маленькое для кривой Гильберта 3-го порядка с шагом 4 по ширине."
-
-    for (x, y) in points:
-        px_x = x * 4
-        if y >= height or px_x >= width:
-            break
-        try:
-            px = modify_image[y, px_x][0]
-            c = chr(px)
-            if c == "@":  # стоп-символ
-                break
-            image_text += c
-        except (IndexError, ValueError):
-            continue
-    
-    return True, image_text
-
-
-def ism_image(input_image, text):
-    """Записывает текст в изображение по кривой Гильберта."""
+def ism_image(input_image, text, password=None):
+    """Шифрует и записывает текст в изображение по кривой Гильберта используя LSB."""
     if not os.path.exists(input_image):
         return False, "Файл не найден."
     
@@ -80,33 +46,133 @@ def ism_image(input_image, text):
         return False, "Ошибка: невозможно загрузить изображение. Проверьте путь и формат файла."
 
     height, width, _ = isnachal_photo.shape
+    
+    # Определяем максимальный порядок кривой Гильберта, который помещается в изображение
+    max_order = 0
+    for order in range(3, 8):  # от 3 до 7
+        min_dim = 2 ** order
+        if height >= min_dim and width >= min_dim * 4:
+            max_order = order
+        else:
+            break
+    
+    if max_order < 3:
+        return False, "Изображение слишком маленькое для кривой Гильберта (минимум 8x32 пикселей)."
+    
+    points = hilbert_curve_points(max_order)
     modify_image = isnachal_photo.copy()
 
-    order = 3
-    points = hilbert_curve_points(order)
+    # Если пароль предоставлен, шифруем текст
+    if password:
+        binary_payload = encrypt_message(password, text)
+    else:
+        # Без пароля просто конвертируем текст в биты (не рекомендуется для безопасности)
+        binary_payload = ''.join(format(ord(c), '08b') for c in text)
+    
+    # Добавляем префикс с длиной данных (32 бита)
+    length_prefix = format(len(binary_payload), '032b')
+    full_payload = length_prefix + binary_payload
+    
+    # Проверяем, что изображение вмещает все биты
+    max_capacity = len(points) * 3  # 3 канала на пиксель
+    if len(full_payload) > max_capacity:
+        return False, f"Текст слишком большой для этого изображения. Максимум бит: {max_capacity} (порядок {max_order}), требуется: {len(full_payload)}. Попробуйте изображение большего размера."
 
-    if height < 8 or width < 8*4:
-        return False, "Изображение слишком маленькое для кривой Гильберта 3-го порядка с шагом 4 по ширине."
-
-    ism_text = [ord(i) for i in text]
-
-    for i, (x, y) in enumerate(points):
-        if i >= len(ism_text):
-            break
+    # Внедряем биты в LSB каналов пикселей
+    bit_index = 0
+    for (x, y) in points:
         px_x = x * 4
         if px_x >= width or y >= height:
-            return False, f"Координата выходит за пределы изображения. Запись остановлена."
+            break
+        
         try:
-            modify_image[y, px_x][0] = ism_text[i]
-        except (IndexError, ValueError):
-            continue
+            pixel = modify_image[y, px_x].copy()
+            for channel in range(3):
+                if bit_index >= len(full_payload):
+                    break
+                pixel[channel] = embed_bit(pixel[channel], full_payload[bit_index])
+                bit_index += 1
+            modify_image[y, px_x] = pixel
+            
+            if bit_index >= len(full_payload):
+                break
+        except (IndexError, ValueError) as e:
+            return False, f"Ошибка при записи бита {bit_index}: {e}"
+
+    if bit_index < len(full_payload):
+        return False, f"Не удалось записать все данные. Записано: {bit_index} из {len(full_payload)} бит."
 
     output_path = "modify_image.png"
     try:
         cv2.imwrite(output_path, modify_image)
-        return True, f"Текст успешно записан в изображение и сохранен как {output_path}."
+        return True, f"Текст успешно зашифрован и записан в изображение (LSB, порядок {max_order}). Сохранен как {output_path}."
     except Exception as e:
         return False, f"Ошибка при сохранении файла: {e}"
+
+
+def image_looking(input_image, password=None):
+    """Извлекает и расшифровывает текст из изображения по кривой Гильберта."""
+    if not os.path.exists(input_image):
+        return False, "Файл не найден."
+    
+    modify_image = cv2.imread(input_image)
+    if modify_image is None:
+        return False, "Ошибка: невозможно загрузить изображение. Проверьте путь и формат файла."
+
+    height, width, _ = modify_image.shape
+
+    # Определяем максимальный порядок кривой Гильберта
+    max_order = 0
+    for order in range(3, 8):
+        min_dim = 2 ** order
+        if height >= min_dim and width >= min_dim * 4:
+            max_order = order
+        else:
+            break
+    
+    if max_order < 3:
+        return False, "Изображение слишком маленькое для кривой Гильберта."
+    
+    points = hilbert_curve_points(max_order)
+
+    # Извлекаем биты из LSB каналов пикселей
+    extracted_bits = ""
+    max_bits = len(points) * 3  # 3 канала на пиксель (BGR)
+    
+    for (x, y) in points:
+        px_x = x * 4
+        if y >= height or px_x >= width:
+            break
+        try:
+            pixel = modify_image[y, px_x]
+            # Извлекаем биты из каждого канала (B, G, R)
+            for channel in range(3):
+                extracted_bits += extract_bit(pixel[channel])
+                if len(extracted_bits) >= max_bits:
+                    break
+        except (IndexError, ValueError):
+            continue
+    
+    # Читаем длину данных из первых 32 бит
+    if len(extracted_bits) < 32:
+        return False, "Недостаточно данных для чтения длины."
+    
+    data_length = int(extracted_bits[:32], 2)
+    data_bits = extracted_bits[32:32+data_length]
+    
+    if len(data_bits) < data_length:
+        return False, f"Недостаточно данных. Ожидалось: {data_length}, получено: {len(data_bits)}"
+    
+    # Если пароль предоставлен, пытаемся расшифровать
+    if password:
+        try:
+            decrypted_text = decrypt_message(password, data_bits)
+            return True, decrypted_text
+        except Exception as e:
+            return False, f"Ошибка расшифровки: неверный пароль или повреждённые данные. ({e})"
+    else:
+        # Без пароля возвращаем сырые биты (для отладки)
+        return True, f"Извлечено бит: {len(data_bits)}. Требуется пароль для расшифровки."
 
 
 class HilbertSteganographyApp:
@@ -164,6 +230,17 @@ class HilbertSteganographyApp:
         self.text_entry = ttk.Entry(self.text_frame)
         self.text_entry.pack(fill=tk.X)
         
+        # Фрейм ввода пароля
+        self.password_frame = ttk.LabelFrame(main_frame, text="Пароль шифрования", padding="10")
+        self.password_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        self.password_var = tk.StringVar()
+        password_entry = ttk.Entry(self.password_frame, textvariable=self.password_var, show="*")
+        password_entry.pack(fill=tk.X)
+        password_hint = ttk.Label(self.password_frame, text="Пароль используется для AES-GCM шифрования", 
+                                  font=('Arial', 8), foreground='gray')
+        password_hint.pack(fill=tk.X, pady=(5, 0))
+        
         # Фрейм результата
         result_frame = ttk.LabelFrame(main_frame, text="Результат", padding="10")
         result_frame.pack(fill=tk.BOTH, expand=True)
@@ -195,9 +272,11 @@ class HilbertSteganographyApp:
         
         if operation == "encode":
             self.text_frame.pack(fill=tk.X, pady=(0, 10))
+            self.password_frame.pack(fill=tk.X, pady=(0, 10))
             self.action_button.config(text="Закодировать")
         else:
             self.text_frame.pack_forget()
+            self.password_frame.pack(fill=tk.X, pady=(0, 10))
             self.action_button.config(text="Извлечь")
         
         self.clear_result()
@@ -240,6 +319,8 @@ class HilbertSteganographyApp:
     def _run_operation(self, operation, file_path):
         """Запускает операцию обработки изображения."""
         try:
+            password = self.password_var.get().strip()
+            
             if operation == "encode":
                 text = self.text_entry.get().strip()
                 if not text:
@@ -248,10 +329,23 @@ class HilbertSteganographyApp:
                     self.root.after(0, lambda: self.status_var.set("Готов к работе"))
                     return
                 
-                text_with_stop = text + "@"  # Добавляем стоп-символ
-                success, result = ism_image(file_path, text_with_stop)
+                if not password:
+                    self.root.after(0, lambda: messagebox.showwarning("Предупреждение", 
+                        "Введите пароль для шифрования. Без пароля данные не будут защищены."))
+                    self.root.after(0, lambda: self.action_button.config(state=tk.NORMAL))
+                    self.root.after(0, lambda: self.status_var.set("Готов к работе"))
+                    return
+                
+                success, result = ism_image(file_path, text, password)
             else:
-                success, result = image_looking(file_path)
+                if not password:
+                    self.root.after(0, lambda: messagebox.showwarning("Предупреждение", 
+                        "Введите пароль для расшифровки."))
+                    self.root.after(0, lambda: self.action_button.config(state=tk.NORMAL))
+                    self.root.after(0, lambda: self.status_var.set("Готов к работе"))
+                    return
+                
+                success, result = image_looking(file_path, password)
             
             # Обновляем UI в главном потоке
             self.root.after(0, lambda: self._update_result(success, result))
