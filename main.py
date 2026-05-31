@@ -33,10 +33,13 @@ def hilbert_curve_points(order):
 
 
 def image_looking(input_image):
-    if os.path.exists(input_image):
-        modify_image = cv2.imread(input_image)
-    else:
+    if not os.path.exists(input_image):
         print("Файл не найден.")
+        return
+    
+    modify_image = cv2.imread(input_image)
+    if modify_image is None:
+        print("Ошибка: невозможно загрузить изображение. Проверьте путь и формат файла.")
         return
 
     image_text = ""
@@ -51,7 +54,10 @@ def image_looking(input_image):
         return
 
     for (x, y) in points:
-        px = modify_image[y, x*4][0]  # x умножаем на 4, как в оригинальном коде
+        px_x = x * 4
+        if y >= height or px_x >= width:
+            break
+        px = modify_image[y, px_x][0]
         c = chr(px)
         if c == "@":  # стоп-символ
             break
@@ -60,9 +66,13 @@ def image_looking(input_image):
 
 
 def ism_image(input_image, text):
+    if not os.path.exists(input_image):
+        print("Файл не найден.")
+        return
+    
     isnachal_photo = cv2.imread(input_image)
     if isnachal_photo is None:
-        print("Ошибка: невозможно загрузить изображение. Проверьте путь.")
+        print("Ошибка: невозможно загрузить изображение. Проверьте путь и формат файла.")
         return
 
     height, width, _ = isnachal_photo.shape
@@ -79,13 +89,17 @@ def ism_image(input_image, text):
     print("Записываем текст в изображение...")
 
     for i, (x, y) in enumerate(points):
-        if i < len(ism_text):
-            modify_image[y, x*4][0] = ism_text[i]
-        else:
+        if i >= len(ism_text):
             break
+        px_x = x * 4
+        if px_x >= width:
+            print(f"Предупреждение: координата x={px_x} выходит за пределы ширины изображения ({width}). Запись остановлена.")
+            break
+        modify_image[y, px_x][0] = ism_text[i]
 
-    cv2.imwrite(r"modify_image.png", modify_image)
-    print("Текст успешно записан в изображение и сохранен как modify_image.png.")
+    output_path = "modify_image.png"
+    cv2.imwrite(output_path, modify_image)
+    print(f"Текст успешно записан в изображение и сохранен как {output_path}.")
 
 
 def menu():
@@ -94,16 +108,25 @@ def menu():
 
 
 while True:
-    menu()
-    choice = input("Что вы хотите сделать: ")
-    if int(choice) == 1:
-        input_image = input("\nВведите путь к фото\n")
-        text = input("Введите текст\n") + "@"  # Добавляем стоп-символ
-        ism_image(input_image, text)
+    try:
+        menu()
+        choice = input("Что вы хотите сделать: ")
+        choice_int = int(choice)
+        if choice_int == 1:
+            input_image = input("\nВведите путь к фото\n")
+            text = input("Введите текст\n") + "@"  # Добавляем стоп-символ
+            ism_image(input_image, text)
 
-    elif int(choice) == 2:
-        input_image = input("\nВведите путь к фото\n")
-        image_looking(input_image)
+        elif choice_int == 2:
+            input_image = input("\nВведите путь к фото\n")
+            image_looking(input_image)
 
-    else:
-        print("Неверный выбор, попробуйте снова.")
+        else:
+            print("Неверный выбор, попробуйте снова.")
+    except ValueError:
+        print("Ошибка: введите число (1 или 2).")
+    except KeyboardInterrupt:
+        print("\nПрограмма завершена пользователем.")
+        break
+    except Exception as e:
+        print(f"Произошла непредвиденная ошибка: {e}")
